@@ -594,14 +594,20 @@ function renderMessages() {
 
   for (const message of session.messages) {
     const wrapper = document.createElement("article");
-    wrapper.className = `message ${message.role}`;
+    wrapper.className = `message ${message.role}${message.streaming ? " streaming" : ""}`;
     const role = document.createElement("div");
     role.className = "message-role";
-    role.textContent = message.role === "user" ? "あなた" : "Gemma";
+    role.textContent = message.role === "user" ? "あなた" : message.streaming ? "Gemma ・ 生成中" : "Gemma";
     const bubble = document.createElement("div");
     bubble.className = "bubble";
-    bubble.textContent = message.content;
+    bubble.textContent = message.content || (message.streaming ? "生成中..." : "");
     wrapper.append(role, bubble);
+    if (message.streaming) {
+      const status = document.createElement("div");
+      status.className = "streaming-status";
+      status.textContent = "逐次表示中 ・ ■ で停止";
+      wrapper.append(status);
+    }
     if (message.imagePreviews && message.imagePreviews.length > 0) {
       const images = document.createElement("div");
       images.className = "message-images";
@@ -1574,6 +1580,72 @@ function localDateTimeAnswer(text) {
   return `現在時刻は ${date}（${weekday}） ${time}（${timeZone}）です。`;
 }
 
+function isWeatherRequest(text) {
+  return /(天気|気温|降水|雨|晴れ|曇り|weather|temperature|forecast)/i.test(text);
+}
+
+function weatherLocationFromText(text) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const explicit = normalized.match(/(.+?)(?:の|で|における)(?:今日|現在|今|明日|週間)?(?:の)?(?:天気|気温|降水|weather|forecast)/i);
+  if (explicit) {
+    const location = explicit[1]
+      .replace(/^(今日|現在|今|明日|本日|いま)\s*/i, "")
+      .replace(/^(今日の|現在の|今の|明日の)/, "")
+      .trim();
+    if (location && !/^(今日|現在|今|明日|本日|いま)$/.test(location)) return location;
+  }
+  const trailing = normalized.match(/(?:天気|気温|降水|weather|forecast).{0,8}(?: in | at | for )([A-Za-z\s.-]+)$/i);
+  if (trailing?.[1]) return trailing[1].trim();
+  return "";
+}
+
+async function handleWeatherRequest(text) {
+  if (!isWeatherRequest(text)) return false;
+  let session = activeSession();
+  if (!session) {
+    newSession();
+    session = activeSession();
+  }
+  const location = weatherLocationFromText(text);
+  session.messages.push({ role: "user", content: text });
+  updateSessionTitle(session, text);
+  state.busy = true;
+  startProgressTimer("天気取得中");
+  saveSessions();
+  render();
+  try {
+    const response = await fetch("/api/weather", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ location }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.ok) {
+      throw new Error(data.error || "天気を取得できませんでした");
+    }
+    const durationSeconds = (Date.now() - state.startedAt) / 1000;
+    session.messages.push({
+      role: "assistant",
+      content: data.answer,
+      sources: [{ title: "Open-Meteo", url: "https://open-meteo.com/" }],
+      durationSeconds,
+    });
+  } catch (error) {
+    const durationSeconds = state.startedAt ? (Date.now() - state.startedAt) / 1000 : 0;
+    session.messages.push({
+      role: "assistant",
+      content: `天気取得エラー: ${error.message}`,
+      durationSeconds,
+    });
+  } finally {
+    state.busy = false;
+    stopProgressTimer();
+    saveSessions();
+    render();
+  }
+  return true;
+}
+
 function handleLocalUtilityRequest(text) {
   if (!isLocalDateTimeRequest(text)) return false;
   let session = activeSession();
@@ -1934,6 +2006,7 @@ els.composer.addEventListener("submit", async (event) => {
   els.prompt.value = "";
   resizePrompt();
   if (text && state.pendingImages.length === 0 && handleLocalUtilityRequest(text)) return;
+  if (text && state.pendingImages.length === 0 && (await handleWeatherRequest(text))) return;
   if (text && state.pendingImages.length === 0 && isImageGenerationRequest(text)) {
     await generateImageFromChat(text);
     return;

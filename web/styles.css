@@ -830,6 +830,32 @@ select:focus {
   line-height: 1.55;
 }
 
+.message.streaming .bubble {
+  border-color: var(--active-line);
+}
+
+.message.streaming .bubble::after {
+  content: "";
+  display: inline-block;
+  width: 0.56em;
+  height: 1.1em;
+  margin-left: 3px;
+  background: var(--accent);
+  vertical-align: -0.18em;
+  animation: stream-caret 0.9s steps(1) infinite;
+}
+
+.streaming-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@keyframes stream-caret {
+  50% {
+    opacity: 0;
+  }
+}
+
 .sources {
   display: flex;
   flex-wrap: wrap;

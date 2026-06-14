@@ -44,6 +44,9 @@ IMAGE_PROMPT_SYSTEM = (
     "Return only the prompt, with no quotes, no labels, and no explanation."
 )
 SEARCH_URL = "https://html.duckduckgo.com/html/"
+GEOCODING_URL = "https://geocoding-api.open-meteo.com/v1/search"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+DEFAULT_WEATHER_LOCATION = os.environ.get("GEMMA_WEATHER_LOCATION", "東京")
 MAX_TREE_FILES = 700
 MAX_FILE_BYTES = 120_000
 MAX_CONTEXT_CHARS = 80_000
@@ -109,6 +112,55 @@ TEXT_EXTENSIONS = {
     ".xml",
     ".yaml",
     ".yml",
+}
+WEATHER_CODES = {
+    0: "快晴",
+    1: "晴れ",
+    2: "一部曇り",
+    3: "曇り",
+    45: "霧",
+    48: "霧氷を伴う霧",
+    51: "弱い霧雨",
+    53: "霧雨",
+    55: "強い霧雨",
+    56: "弱い着氷性霧雨",
+    57: "強い着氷性霧雨",
+    61: "弱い雨",
+    63: "雨",
+    65: "強い雨",
+    66: "弱い着氷性の雨",
+    67: "強い着氷性の雨",
+    71: "弱い雪",
+    73: "雪",
+    75: "強い雪",
+    77: "霧雪",
+    80: "弱いにわか雨",
+    81: "にわか雨",
+    82: "強いにわか雨",
+    85: "弱いにわか雪",
+    86: "強いにわか雪",
+    95: "雷雨",
+    96: "ひょうを伴う雷雨",
+    99: "強いひょうを伴う雷雨",
+}
+WEATHER_LOCATION_ALIASES = {
+    "東京": "Tokyo",
+    "東京都": "Tokyo",
+    "大阪": "Osaka",
+    "大阪府": "Osaka",
+    "京都": "Kyoto",
+    "京都府": "Kyoto",
+    "名古屋": "Nagoya",
+    "横浜": "Yokohama",
+    "神奈川": "Yokohama",
+    "札幌": "Sapporo",
+    "北海道": "Sapporo",
+    "仙台": "Sendai",
+    "福岡": "Fukuoka",
+    "広島": "Hiroshima",
+    "神戸": "Kobe",
+    "沖縄": "Naha",
+    "那覇": "Naha",
 }
 
 
@@ -336,6 +388,107 @@ def search_web(query: str, max_results: int = 4) -> list[dict[str, str]]:
         if len(deduped) >= max_results:
             break
     return deduped
+
+
+def weather_description(code: object) -> str:
+    try:
+        return WEATHER_CODES.get(int(code), f"不明な天気コード {code}")
+    except Exception:
+        return "不明"
+
+
+def geocode_location(location: str) -> dict:
+    requested_name = location.strip() or DEFAULT_WEATHER_LOCATION
+    name = WEATHER_LOCATION_ALIASES.get(requested_name, requested_name)
+    query = urllib.parse.urlencode({"name": name, "count": 1, "language": "ja", "format": "json"})
+    request = urllib.request.Request(
+        f"{GEOCODING_URL}?{query}",
+        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 Gemma4LocalWebUI/1.0"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    results = data.get("results") or []
+    if not results:
+        raise ValueError(f"場所が見つかりませんでした: {name}")
+    result = results[0]
+    return {
+        "name": result.get("name") or name,
+        "admin1": result.get("admin1") or "",
+        "country": result.get("country") or "",
+        "latitude": result.get("latitude"),
+        "longitude": result.get("longitude"),
+        "timezone": result.get("timezone") or "auto",
+    }
+
+
+def fetch_weather(location: str) -> dict:
+    place = geocode_location(location)
+    query = urllib.parse.urlencode(
+        {
+            "latitude": place["latitude"],
+            "longitude": place["longitude"],
+            "current": ",".join(
+                [
+                    "temperature_2m",
+                    "relative_humidity_2m",
+                    "apparent_temperature",
+                    "precipitation",
+                    "weather_code",
+                    "wind_speed_10m",
+                ]
+            ),
+            "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
+            "timezone": place["timezone"],
+            "forecast_days": 1,
+        }
+    )
+    request = urllib.request.Request(
+        f"{FORECAST_URL}?{query}",
+        headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0 Gemma4LocalWebUI/1.0"},
+        method="GET",
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        forecast = json.loads(response.read().decode("utf-8"))
+    current = forecast.get("current") or {}
+    current_units = forecast.get("current_units") or {}
+    daily = forecast.get("daily") or {}
+    location_label = " / ".join([item for item in [place["name"], place["admin1"], place["country"]] if item])
+    return {
+        "location": location_label,
+        "timezone": forecast.get("timezone") or place["timezone"],
+        "current": {
+            "time": current.get("time"),
+            "weather": weather_description(current.get("weather_code")),
+            "temperature": current.get("temperature_2m"),
+            "temperatureUnit": current_units.get("temperature_2m", "°C"),
+            "apparentTemperature": current.get("apparent_temperature"),
+            "humidity": current.get("relative_humidity_2m"),
+            "precipitation": current.get("precipitation"),
+            "windSpeed": current.get("wind_speed_10m"),
+        },
+        "today": {
+            "weather": weather_description((daily.get("weather_code") or [None])[0]),
+            "temperatureMax": (daily.get("temperature_2m_max") or [None])[0],
+            "temperatureMin": (daily.get("temperature_2m_min") or [None])[0],
+            "precipitationProbability": (daily.get("precipitation_probability_max") or [None])[0],
+        },
+        "source": "Open-Meteo",
+    }
+
+
+def build_weather_answer(weather: dict) -> str:
+    current = weather["current"]
+    today = weather["today"]
+    unit = current.get("temperatureUnit") or "°C"
+    lines = [
+        f"{weather['location']}の現在の天気は{current['weather']}です。",
+        f"気温は{current['temperature']}{unit}、体感は{current['apparentTemperature']}{unit}、湿度は{current['humidity']}%です。",
+        f"今日の予報は{today['weather']}、最高{today['temperatureMax']}{unit} / 最低{today['temperatureMin']}{unit}、降水確率は最大{today['precipitationProbability']}%です。",
+        f"風速は{current['windSpeed']} km/h、降水量は{current['precipitation']} mmです。",
+        f"更新時刻: {current['time']}（{weather['timezone']}） / 出典: {weather['source']}",
+    ]
+    return "\n".join(lines)
 
 
 def build_search_context(results: list[dict[str, str]]) -> str:
@@ -915,6 +1068,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/search":
             self.handle_search()
             return
+        if self.path == "/api/weather":
+            self.handle_weather()
+            return
         if self.path == "/api/image/generate":
             self.handle_image_generate()
             return
@@ -1091,6 +1247,15 @@ class Handler(BaseHTTPRequestHandler):
             query = str(body.get("query", ""))
             results = search_web(query, int(body.get("max_results", 4)))
             json_response(self, 200, {"ok": True, "query": query, "results": results})
+        except Exception as exc:
+            json_response(self, 500, {"ok": False, "error": str(exc)})
+
+    def handle_weather(self) -> None:
+        try:
+            body = read_json_body(self)
+            location = str(body.get("location") or DEFAULT_WEATHER_LOCATION)
+            weather = fetch_weather(location)
+            json_response(self, 200, {"ok": True, "answer": build_weather_answer(weather), "weather": weather})
         except Exception as exc:
             json_response(self, 500, {"ok": False, "error": str(exc)})
 
