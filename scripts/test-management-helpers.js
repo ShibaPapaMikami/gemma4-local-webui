@@ -17,7 +17,18 @@ const context = {
 vm.createContext(context);
 vm.runInContext(fs.readFileSync("web/management.js", "utf8"), context, { filename: "web/management.js" });
 
-const { formatPluginSearchCapabilities, handleEscapeKey, openManagementPanel, renderPluginsPanel } = context.window.GEMMA_MANAGEMENT;
+const {
+  formatPluginSearchCapabilities,
+  handleEscapeKey,
+  importStudyPackFromFiles,
+  studyPackSelectionModel,
+  studyPackMultiSelectionModel,
+  toggleStudyPackModeValue,
+  studyPackMenuGroups,
+  openManagementPanel,
+  renderPluginsPanel,
+  studyPackById,
+} = context.window.GEMMA_MANAGEMENT;
 
 const els = {
   settingsPanel: { hidden: false },
@@ -53,6 +64,7 @@ const labels = {
   "management.added": "追加済み",
   "management.addCandidate": "あとで検討に入れる",
   "management.addFirst": "先に追加してください",
+  "management.reportWritingPack": "日本語レポート添削",
   "management.candidateSaved": "検討リスト入り（まだ使えません）",
   "management.notAdded": "未追加",
   "management.notImplementedCandidate": "未対応（まだ使えません）",
@@ -70,10 +82,11 @@ const labels = {
   "management.pluginSearchPdfFilenameOnly": "PDFはファイル名のみ",
   "management.pluginSearchImageOcrUnsupported": "画像内文字",
   "management.pluginSearchNone": "未確認",
+  "studyPack.mode.makeReadableShort": "読みやすくする",
 };
 const t = (key, vars = {}) => Object.entries(vars).reduce(
   (text, [name, value]) => text.replace(`{${name}}`, value),
-  labels[key] || key,
+  labels[key] || context.window.GEMMA_IMPORTED_STUDY_PACK_LABELS?.[key] || key,
 );
 assert.equal(
   formatPluginSearchCapabilities({ capabilities: {}, t }),
@@ -118,4 +131,106 @@ assert.match(searchCapabilitiesElement.textContent, /PDF本文/);
 assert.equal(ocrCandidateStatus.textContent, "検討リスト入り（まだ使えません）");
 assert.equal(ocrCandidateToggle.textContent, "検討リストから外す");
 
-console.log("management helper tests passed");
+async function runImportTests() {
+  const makeFile = (name, content) => ({
+    name,
+    webkitRelativePath: `gugenka-mvv-communication-pack/${name}`,
+    async text() {
+      return content;
+    },
+  });
+  const stateForImport = { studyPacks: {} };
+  const result = await importStudyPackFromFiles({
+    state: stateForImport,
+    files: [
+      makeFile("pack.json", JSON.stringify({
+        id: "gugenka-mvv-communication",
+        name: "Gugenka MVV コミュニケーション",
+        version: "0.1.0",
+        description: "GugenkaのMVVに沿って整えます。",
+        visibility: "private",
+        modes: [
+          { id: "slack-rewrite", name: "Slackを整える", promptFile: "modes/slack-rewrite.md" },
+        ],
+      })),
+      makeFile("modes/slack-rewrite.md", "# Slackを整える\n\nGugenkaらしく整えてください。"),
+    ],
+    t,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.definition.id, "gugenka-mvv-communication");
+  assert.equal(result.definition.imported, true);
+  assert.equal(result.definition.private, true);
+  assert.equal(result.definition.modes[0].prompt.includes("Gugenkaらしく"), true);
+  assert.equal(stateForImport.studyPacks["gugenka-mvv-communication"].installed, true);
+  assert.equal(studyPackById("gugenka-mvv-communication").modes[0].prompt.includes("Gugenkaらしく"), true);
+
+  const groups = studyPackMenuGroups({
+    packs: [
+      {
+        id: "ja-report-writing-basic",
+        nameKey: "management.reportWritingPack",
+        modes: [
+          { id: "make-readable", shortKey: "studyPack.mode.makeReadableShort" },
+        ],
+      },
+      result.definition,
+    ],
+    selectedValue: "gugenka-mvv-communication:slack-rewrite",
+    t,
+  });
+  assert.equal(groups.length, 2);
+  assert.equal(groups[0].label, "日本語レポート添削");
+  assert.equal(groups[1].label, "Gugenka MVV コミュニケーション");
+  assert.equal(groups[1].modes[0].value, "gugenka-mvv-communication:slack-rewrite");
+  assert.equal(groups[1].modes[0].active, true);
+
+  const selectionModel = studyPackSelectionModel({
+    packs: [
+      {
+        id: "ja-report-writing-basic",
+        nameKey: "management.reportWritingPack",
+        modes: [
+          { id: "make-readable", shortKey: "studyPack.mode.makeReadableShort" },
+        ],
+      },
+      result.definition,
+    ],
+    selectedPackId: "",
+    selectedValue: "gugenka-mvv-communication:slack-rewrite",
+    t,
+  });
+  assert.equal(selectionModel.activePackId, "gugenka-mvv-communication");
+  assert.equal(selectionModel.packOptions[1].label, "Gugenka MVV コミュニケーション");
+  assert.equal(selectionModel.modeOptions.length, 1);
+  assert.equal(selectionModel.modeOptions[0].label, "Slackを整える");
+  assert.equal(selectionModel.modeOptions[0].active, true);
+
+  const multiSelectionModel = studyPackMultiSelectionModel({
+    packs: [
+      {
+        id: "ja-report-writing-basic",
+        nameKey: "management.reportWritingPack",
+        modes: [
+          { id: "make-readable", shortKey: "studyPack.mode.makeReadableShort" },
+        ],
+      },
+      result.definition,
+    ],
+    selectedValues: [
+      "ja-report-writing-basic:make-readable",
+      "gugenka-mvv-communication:slack-rewrite",
+    ],
+    t,
+  });
+  assert.equal(multiSelectionModel.selectedCount, 2);
+  assert.equal(multiSelectionModel.summaryLabel, "教材パック 2件");
+  assert.equal(multiSelectionModel.groups[0].modes[0].checked, true);
+  assert.equal(multiSelectionModel.groups[1].modes[0].checked, true);
+  assert.deepEqual(Array.from(toggleStudyPackModeValue(["a:one"], "b:two", true)), ["a:one", "b:two"]);
+  assert.deepEqual(Array.from(toggleStudyPackModeValue(["a:one", "b:two"], "a:one", false)), ["b:two"]);
+}
+
+runImportTests().then(() => {
+  console.log("management helper tests passed");
+});
